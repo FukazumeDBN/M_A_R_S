@@ -1,0 +1,15 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Local IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+
+# Local M.A.R.S. runtime artifacts
+*.log
+*.tmp
