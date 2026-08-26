@@ -9,6 +9,7 @@ M.A.R.S.（Minecraft Administration & Runtime Supervisor）は、Ubuntu系Linux�
 | 状態 | Draft 1.7（物理分離・M.A.R.S.連動tmux・対話型VTEを実装） |
 | 最終更新 | 2026-08-27 JST |
 | 対象プロジェクト | `mars` |
+| GitHubリポジトリ | `https://github.com/FukazumeDBN/M_A_R_S`（非公開） |
 | 進捗DB | `/home/chappy/empire/data/empire.sqlite3` |
 | 進捗DBプロジェクト | 新規作業は`mars`、既存履歴は`minecraft-server` |
 | 直近の完了タスク | Task 18、19、20、21、22 |
