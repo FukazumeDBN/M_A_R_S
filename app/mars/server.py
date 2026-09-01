@@ -6,9 +6,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .operations import ServerOperationLock
 from .settings import AppSettings
 from .terminal import TerminalBackend, TerminalError, create_terminal_backend
-from .operations import ServerOperationLock
 
 
 class ServerCommandError(RuntimeError):
@@ -29,6 +29,8 @@ class ServerStatus:
 
 class ServerRuntime:
     """Terminal-centric Minecraft runtime used by the GUI and extensions."""
+
+    SAVE_COMPLETE_MARKERS = ("Saved the game", "Saved the world")
 
     def __init__(
         self,
@@ -51,7 +53,7 @@ class ServerRuntime:
 
     @staticmethod
     def _validate_command(command: str, label: str) -> str:
-        if not command.strip():
+        if not isinstance(command, str) or not command.strip():
             raise ServerCommandError(f"{label} commandは空にできません")
         if "\n" in command or "\r" in command or "\0" in command:
             raise ServerCommandError(f"{label} commandは1行で入力してください")
@@ -83,7 +85,7 @@ class ServerRuntime:
 
     def process_active(self) -> bool:
         try:
-            return self.terminal.exists() and not self.terminal.is_idle()
+            return bool(self.terminal.child_processes())
         except TerminalError:
             return False
 
@@ -106,6 +108,31 @@ class ServerRuntime:
                 return True
         except OSError:
             return False
+
+    def save_log_cursor(self) -> int:
+        """Return the byte offset used to detect completion of save-all flush."""
+        try:
+            return (self.server_dir / "logs" / "latest.log").stat().st_size
+        except OSError:
+            return 0
+
+    def wait_for_save_complete(self, cursor: int, timeout: float = 45) -> None:
+        """Wait until Minecraft reports that save-all flush has completed."""
+        latest_log = self.server_dir / "logs" / "latest.log"
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                size = latest_log.stat().st_size
+                offset = cursor if size >= cursor else 0  # latest.log may rotate.
+                with latest_log.open("rb") as handle:
+                    handle.seek(offset)
+                    output = handle.read().decode("utf-8", errors="replace")
+                if any(marker in output for marker in self.SAVE_COMPLETE_MARKERS):
+                    return
+            except OSError:
+                pass
+            time.sleep(0.1)
+        raise ServerCommandError("save-all flushの完了を確認できないためバックアップを中断しました")
 
     def status(self, console: str | None = None) -> ServerStatus:
         terminal_running = self.terminal_running()
@@ -140,6 +167,21 @@ class ServerRuntime:
                 self.stop()
                 self._wait_until_stopped(timeout)
             return self.start()
+
+    def restart_with_backup(self, backup_service, keep_count: int = 7, keep_days: int = 30, timeout: float = 45):
+        """Stop, back up the stopped server, then start it again as one operation."""
+        with ServerOperationLock(self.server_dir):
+            if self._port_open() or self.process_active():
+                self.stop()
+                self._wait_until_stopped(timeout)
+            try:
+                result = backup_service.create_locked(keep_count, keep_days)
+            except Exception:
+                # A failed backup must not leave a normally managed server down.
+                self.start()
+                raise
+            start_result = self.start()
+            return result, start_result
 
     def _wait_until_stopped(self, timeout: float, stable_for: float = 0.5) -> None:
         deadline = time.monotonic() + timeout
@@ -219,6 +261,12 @@ class UnconfiguredServerRuntime:
         raise self._error()
 
     def terminal_running(self) -> bool:
+        return False
+
+    def process_active(self) -> bool:
+        return False
+
+    def minecraft_process_active(self) -> bool:
         return False
 
     def status(self, console: str | None = None) -> ServerStatus:

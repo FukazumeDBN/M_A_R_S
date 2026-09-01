@@ -23,8 +23,6 @@ class TerminalBackend(Protocol):
 
     def child_processes(self) -> tuple[str, ...]: ...
 
-    def is_idle(self) -> bool: ...
-
     def attach_argv(self) -> list[str]: ...
 
     def close(self) -> bool: ...
@@ -34,7 +32,7 @@ class TmuxTerminalBackend:
     SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
     def __init__(self, session_name: str, runner=None):
-        if not self.SESSION_PATTERN.fullmatch(session_name):
+        if not isinstance(session_name, str) or not self.SESSION_PATTERN.fullmatch(session_name):
             raise TerminalError("tmuxセッション名には英数字、点、ハイフン、アンダースコアだけを使用できます")
         self.session_name = session_name
         self.runner = runner or subprocess.run
@@ -42,7 +40,7 @@ class TmuxTerminalBackend:
     def _run(self, *args: str, timeout: float = 10) -> subprocess.CompletedProcess[str]:
         try:
             return self.runner(["tmux", *args], text=True, capture_output=True, timeout=timeout, check=False)
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             raise TerminalError(f"tmuxを実行できません: {exc}") from exc
 
     @staticmethod
@@ -67,8 +65,8 @@ class TmuxTerminalBackend:
         return created
 
     def send_line(self, line: str) -> None:
-        if "\n" in line or "\r" in line:
-            raise TerminalError("複数行のコマンドは送信できません")
+        if "\n" in line or "\r" in line or "\0" in line:
+            raise TerminalError("改行またはNUL文字を含むコマンドは送信できません")
         if not self.exists():
             raise TerminalError("仮想ターミナルが起動していません")
         literal = self._run("send-keys", "-t", self.session_name, "-l", line)
@@ -144,9 +142,6 @@ class TmuxTerminalBackend:
                 commands.append(command)
             pending.extend(self._children_of(pid))
         return tuple(commands)
-
-    def is_idle(self) -> bool:
-        return self.exists() and not self.child_processes()
 
     def attach_argv(self) -> list[str]:
         return ["tmux", "attach-session", "-t", self.session_name]

@@ -2,7 +2,7 @@
 
 Minecraft Administration & Runtime Supervisorは、Ubuntu系LinuxでMinecraftサーバーを監視・操作・自動運用するGTKアプリケーション。
 
-開発要件は[DEVELOPMENT_REQUIREMENTS.md](DEVELOPMENT_REQUIREMENTS.md)、進捗は`/home/chappy/empire/data/empire.sqlite3`の`mars`プロジェクトを正本とする。
+開発要件は[DEVELOPMENT_REQUIREMENTS.md](DEVELOPMENT_REQUIREMENTS.md)、現在地と引き継ぎ情報は[DEVELOPMENT_NOTES.md](DEVELOPMENT_NOTES.md)、進捗は`/home/chappy/empire/data/empire.sqlite3`の`mars`プロジェクトを正本とする。
 
 ## 起動
 
@@ -15,7 +15,13 @@ cd /home/chappy/empire/projects/mars
 
 右側の端末はマウスホイールでtmuxの履歴をスクロールできる。履歴を閲覧中は新しい出力で表示位置を強制的に末尾へ戻さず、最下部へ戻ると通常の自動追従に戻る。tmuxのマウス操作はM.A.R.S.が管理セッションへ自動適用する。
 
+Automationタブでは、自動再起動と独立バックアップを月〜日のトグルボタン（黒=Enable、白=Disable）と共通時刻（24時間表記のHH:MM）で設定できる。バックアップを再起動連動にした場合は、再起動と同じ曜日・時刻に設定表示も同期し、停止完了確認→バックアップ→起動の順で処理する。
+
+稼働中バックアップは`save-all flush`の完了を確認してから圧縮し、終了時には`save-on`の復旧を試みる。世代整理の対象はM.A.R.S.のマニフェストを持つアーカイブだけに限定する。
+
 通常終了時はMinecraftへ正常停止コマンドを送り、停止を確認してから管理tmuxセッションを終了する。正常停止を確認できない場合は、安全のためアプリ終了を中断してセッションを残す。
+
+Minecraftが稼働中または起動途中にウィンドウを閉じる場合は確認ダイアログを表示する。YESで安全停止後に終了し、NOではサーバーもM.A.R.S.も終了しない。
 
 ## テスト
 

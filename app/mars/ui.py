@@ -14,7 +14,7 @@ from gi.repository import Gdk, GLib, Gtk, Pango, Vte
 
 from .backup import BackupService
 from .jvm import JvmArgumentFile
-from .scheduler import ScheduleValidationError, interval_expression
+from .scheduler import ScheduleValidationError, WEEKDAYS, calendar_expression, validate_time
 from .services import ApplicationServices
 from .settings import AppSettings
 
@@ -79,6 +79,9 @@ class MainWindow(Gtk.ApplicationWindow):
             .start-action { color: #16823b; }
             .stop-action { color: #c62828; }
             .restart-action { color: #24527a; }
+            .schedule-day { min-width: 30px; min-height: 28px; padding: 2px 5px; background: #ffffff; color: #000000; }
+            .schedule-day:checked { background: #000000; color: #ffffff; }
+            .schedule-day:checked:hover { background: #222222; color: #ffffff; }
             .counter-info { color: #333333; font-weight: bold; }
             .counter-warn { color: #a87900; font-weight: bold; }
             .counter-error { color: #c62828; font-weight: bold; }
@@ -453,7 +456,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if not self.server.configured:
             self._show_error("先にMinecraftサーバーディレクトリを登録してください。")
             return
-        if self.server.status().running:
+        if self.server.status(console="").running or self.server.minecraft_process_active():
             self._show_error("JVM設定はMinecraftサーバー停止中に適用してください。")
             return
         start, end = self.jvm_custom_buffer.get_bounds()
@@ -466,65 +469,80 @@ class MainWindow(Gtk.ApplicationWindow):
         )
 
     @staticmethod
-    def _combo(values: list[str], selected: str) -> Gtk.ComboBoxText:
-        combo = Gtk.ComboBoxText()
-        for value in values:
-            combo.append(value, value)
-        combo.set_active_id(selected if selected in values else values[0])
-        return combo
+    def _weekday_buttons(selected: list[str]) -> tuple[Gtk.Box, dict[str, Gtk.ToggleButton]]:
+        labels = dict(zip(WEEKDAYS, ("月", "火", "水", "木", "金", "土", "日")))
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        buttons: dict[str, Gtk.ToggleButton] = {}
+        for day in WEEKDAYS:
+            button = Gtk.ToggleButton(label=labels[day])
+            button.get_style_context().add_class("schedule-day")
+            button.set_active(day in selected)
+            button.set_tooltip_text(day)
+            buttons[day] = button
+            box.pack_start(button, False, False, 0)
+        return box, buttons
+
+    @staticmethod
+    def _time_entry(value: str) -> Gtk.Entry:
+        entry = Gtk.Entry()
+        entry.set_width_chars(5)
+        entry.set_max_length(5)
+        entry.set_placeholder_text("HH:MM")
+        entry.set_text(value)
+        return entry
 
     def _automation_page(self) -> Gtk.Widget:
         grid = self._page_grid()
-        grid.attach(self._label("Automation", "page-title"), 0, 0, 3, 1)
-        grid.attach(self._label("GUIを閉じてもsystemdユーザータイマーで実行されます", "muted"), 0, 1, 3, 1)
+        grid.attach(self._label("Automation", "page-title"), 0, 0, 4, 1)
+        grid.attach(self._label("GUIを閉じてもsystemdユーザータイマーで実行されます", "muted"), 0, 1, 4, 1)
 
-        grid.attach(self._label("Scheduled restart", "section-title"), 0, 3, 3, 1)
+        grid.attach(self._label("Scheduled restart", "section-title"), 0, 3, 4, 1)
         grid.attach(self._label("Enabled", "muted"), 0, 4, 1, 1)
         self.restart_enabled = Gtk.Switch()
         self.restart_enabled.set_active(self.settings.restart.enabled)
         self.restart_enabled.set_halign(Gtk.Align.START)
         grid.attach(self.restart_enabled, 1, 4, 1, 1)
-        grid.attach(self._label("Interval", "muted"), 0, 5, 1, 1)
-        self.restart_interval = Gtk.SpinButton.new_with_range(1, 999, 1)
-        self.restart_interval.set_value(self.settings.restart.interval_value)
-        grid.attach(self.restart_interval, 1, 5, 1, 1)
-        self.restart_interval_unit = self._combo(["hours", "days"], self.settings.restart.interval_unit)
-        grid.attach(self.restart_interval_unit, 2, 5, 1, 1)
+        grid.attach(self._label("Weekdays", "muted"), 0, 5, 1, 1)
+        self.restart_days, self.restart_day_buttons = self._weekday_buttons(self.settings.restart.days)
+        grid.attach(self.restart_days, 1, 5, 3, 1)
+        grid.attach(self._label("Time", "muted"), 0, 6, 1, 1)
+        self.restart_time = self._time_entry(self.settings.restart.time)
+        grid.attach(self.restart_time, 1, 6, 1, 1)
 
-        grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 7, 3, 1)
-        grid.attach(self._label("Scheduled backup", "section-title"), 0, 8, 3, 1)
-        grid.attach(self._label("Enabled", "muted"), 0, 9, 1, 1)
+        grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 8, 4, 1)
+        grid.attach(self._label("Scheduled backup", "section-title"), 0, 9, 4, 1)
+        grid.attach(self._label("Enabled", "muted"), 0, 10, 1, 1)
         self.backup_enabled = Gtk.Switch()
         self.backup_enabled.set_active(self.settings.backup.enabled)
         self.backup_enabled.set_halign(Gtk.Align.START)
-        grid.attach(self.backup_enabled, 1, 9, 1, 1)
-        grid.attach(self._label("Run with restart", "muted"), 0, 10, 1, 1)
+        grid.attach(self.backup_enabled, 1, 10, 1, 1)
+        grid.attach(self._label("Run with restart", "muted"), 0, 11, 1, 1)
         self.backup_linked = Gtk.Switch()
         self.backup_linked.set_active(self.settings.backup.linked_to_restart)
         self.backup_linked.set_halign(Gtk.Align.START)
         self.backup_linked.connect("notify::active", self._backup_link_changed)
-        grid.attach(self.backup_linked, 1, 10, 1, 1)
-        self.backup_interval_label = self._label("Independent interval", "muted")
-        grid.attach(self.backup_interval_label, 0, 11, 1, 1)
-        self.backup_interval = Gtk.SpinButton.new_with_range(1, 999, 1)
-        self.backup_interval.set_value(self.settings.backup.interval_value)
-        grid.attach(self.backup_interval, 1, 11, 1, 1)
-        self.backup_interval_unit = self._combo(["hours", "days"], self.settings.backup.interval_unit)
-        grid.attach(self.backup_interval_unit, 2, 11, 1, 1)
-        grid.attach(self._label("Destination", "muted"), 0, 12, 1, 1)
+        grid.attach(self.backup_linked, 1, 11, 1, 1)
+        self.backup_schedule_label = self._label("Weekdays", "muted")
+        grid.attach(self.backup_schedule_label, 0, 12, 1, 1)
+        self.backup_days, self.backup_day_buttons = self._weekday_buttons(self.settings.backup.days)
+        grid.attach(self.backup_days, 1, 12, 3, 1)
+        grid.attach(self._label("Time", "muted"), 0, 13, 1, 1)
+        self.backup_time = self._time_entry(self.settings.backup.time)
+        grid.attach(self.backup_time, 1, 13, 1, 1)
+        grid.attach(self._label("Destination", "muted"), 0, 14, 1, 1)
         self.backup_destination = Gtk.Entry()
         self.backup_destination.set_text(self.settings.backup.destination)
         self.backup_destination.set_hexpand(True)
-        grid.attach(self.backup_destination, 1, 12, 1, 1)
+        grid.attach(self.backup_destination, 1, 14, 1, 1)
         choose_backup = Gtk.Button(label="Browse…")
         choose_backup.connect("clicked", self._choose_directory, self.backup_destination, "Select backup destination")
-        grid.attach(choose_backup, 2, 12, 1, 1)
-        grid.attach(self._label("Keep archives", "muted"), 0, 13, 1, 1)
+        grid.attach(choose_backup, 2, 14, 1, 1)
+        grid.attach(self._label("Keep archives", "muted"), 0, 15, 1, 1)
         self.keep_count = Gtk.SpinButton.new_with_range(1, 365, 1)
         self.keep_count.set_value(self.settings.backup.keep_count)
-        grid.attach(self.keep_count, 1, 13, 1, 1)
+        grid.attach(self.keep_count, 1, 15, 1, 1)
         self.automation_summary = self._label("Not applied", "muted")
-        grid.attach(self.automation_summary, 0, 14, 3, 1)
+        grid.attach(self.automation_summary, 0, 16, 4, 1)
         backup_buttons = Gtk.Box(spacing=8)
         save_backup = Gtk.Button(label="Apply automation settings")
         save_backup.connect("clicked", self._save_automation_settings)
@@ -532,15 +550,34 @@ class MainWindow(Gtk.ApplicationWindow):
         manual_backup.connect("clicked", self._manual_backup)
         backup_buttons.pack_start(save_backup, False, False, 0)
         backup_buttons.pack_start(manual_backup, False, False, 0)
-        grid.attach(backup_buttons, 0, 15, 3, 1)
+        grid.attach(backup_buttons, 0, 17, 4, 1)
+        self.restart_time.connect("changed", self._restart_schedule_changed)
+        for button in self.restart_day_buttons.values():
+            button.connect("toggled", self._restart_schedule_changed)
         self._backup_link_changed(self.backup_linked, None)
         return grid
 
     def _backup_link_changed(self, switch: Gtk.Switch, _parameter) -> None:
         independent = not switch.get_active()
-        self.backup_interval_label.set_sensitive(independent)
-        self.backup_interval.set_sensitive(independent)
-        self.backup_interval_unit.set_sensitive(independent)
+        if not independent:
+            self._sync_linked_backup_schedule()
+        self.backup_schedule_label.set_sensitive(independent)
+        self.backup_days.set_sensitive(independent)
+        self.backup_time.set_sensitive(independent)
+
+    def _restart_schedule_changed(self, *_args) -> None:
+        if hasattr(self, "backup_linked") and self.backup_linked.get_active():
+            self._sync_linked_backup_schedule()
+
+    def _sync_linked_backup_schedule(self) -> None:
+        for day in WEEKDAYS:
+            active = self.restart_day_buttons[day].get_active()
+            self.backup_day_buttons[day].set_active(active)
+        self.backup_time.set_text(self.restart_time.get_text())
+
+    @staticmethod
+    def _selected_weekdays(buttons: dict[str, Gtk.ToggleButton]) -> list[str]:
+        return [day for day in WEEKDAYS if buttons[day].get_active()]
 
     def _choose_directory(self, _button: Gtk.Button, target: Gtk.Entry, title: str) -> None:
         # Let the desktop provide the folder picker instead of drawing an
@@ -563,7 +600,7 @@ class MainWindow(Gtk.ApplicationWindow):
             selected = dialog.get_filename()
             if selected:
                 target.set_text(selected)
-        dialog = None
+        dialog.destroy()
 
     def _save_server_path(self, _button: Gtk.Button) -> None:
         if not self.server_entry.get_text().strip():
@@ -627,58 +664,82 @@ class MainWindow(Gtk.ApplicationWindow):
         self._run_async(f"{action}中…", method, lambda result, error: self._operation_finished(f"{action}完了", result, error))
 
     def _save_automation_settings(self, _button: Gtk.Button) -> None:
+        restart_enabled = self.restart_enabled.get_active()
+        backup_enabled = self.backup_enabled.get_active()
+        linked = self.backup_linked.get_active()
+        destination = self.backup_destination.get_text().strip()
+        if not destination:
+            self._show_error("バックアップ保存先を入力してください。")
+            return
+        if backup_enabled and linked and not restart_enabled:
+            self._show_error("再起動連動バックアップを使う場合は、自動再起動も有効にしてください。")
+            return
         try:
-            restart_value = self.restart_interval.get_value_as_int()
-            restart_unit = self.restart_interval_unit.get_active_id() or "hours"
-            backup_value = self.backup_interval.get_value_as_int()
-            backup_unit = self.backup_interval_unit.get_active_id() or "hours"
-            restart_expression = interval_expression(restart_value, restart_unit)
-            backup_expression = interval_expression(backup_value, backup_unit)
+            restart_days = self._selected_weekdays(self.restart_day_buttons)
+            if linked:
+                self._sync_linked_backup_schedule()
+            backup_days = restart_days if linked else self._selected_weekdays(self.backup_day_buttons)
+            if restart_enabled and not restart_days:
+                raise ScheduleValidationError("自動再起動は少なくとも1曜日を有効にしてください")
+            if backup_enabled and not linked and not backup_days:
+                raise ScheduleValidationError("独立バックアップは少なくとも1曜日を有効にしてください")
+            restart_time = validate_time(self.restart_time.get_text())
+            backup_time = restart_time if linked else validate_time(self.backup_time.get_text())
+            fallback_restart_days = restart_days or self.settings.restart.days or [self.settings.restart.day]
+            fallback_backup_days = backup_days or self.settings.backup.days or [self.settings.backup.day]
+            if linked:
+                fallback_backup_days = fallback_restart_days
+            restart_expression = calendar_expression("weekly", ",".join(fallback_restart_days), restart_time)
+            backup_expression = calendar_expression("weekly", ",".join(fallback_backup_days), backup_time)
         except ScheduleValidationError as exc:
             self._show_error(str(exc))
             return
 
-        self.settings.restart.enabled = self.restart_enabled.get_active()
-        self.settings.restart.interval_value = restart_value
-        self.settings.restart.interval_unit = restart_unit
-        self.settings.backup.enabled = self.backup_enabled.get_active()
-        self.settings.backup.linked_to_restart = self.backup_linked.get_active()
-        self.settings.backup.interval_value = backup_value
-        self.settings.backup.interval_unit = backup_unit
-        self.settings.backup.destination = self.backup_destination.get_text().strip()
-        self.settings.backup.keep_count = self.keep_count.get_value_as_int()
-        if not self.settings.backup.destination:
-            self._show_error("バックアップ保存先を入力してください。")
-            return
-        if self.settings.backup.enabled and self.settings.backup.linked_to_restart and not self.settings.restart.enabled:
-            self._show_error("再起動連動バックアップを使う場合は、自動再起動も有効にしてください。")
-            return
+        candidate = copy.deepcopy(self.settings)
+        candidate.restart.enabled = restart_enabled
+        candidate.restart.mode = "weekly"
+        candidate.restart.days = fallback_restart_days
+        candidate.restart.day = candidate.restart.days[0]
+        candidate.restart.time = restart_time
+        candidate.backup.enabled = backup_enabled
+        candidate.backup.linked_to_restart = linked
+        candidate.backup.mode = "weekly"
+        candidate.backup.days = fallback_backup_days
+        candidate.backup.day = candidate.backup.days[0]
+        candidate.backup.time = restart_time if linked else backup_time
+        candidate.backup.destination = destination
+        candidate.backup.keep_count = self.keep_count.get_value_as_int()
+        backup_summary = "restart連動" if backup_enabled and linked else backup_expression
 
-        linked = self.settings.backup.enabled and self.settings.backup.linked_to_restart
-        backup_summary = "restart連動" if linked else backup_expression
-        self.automation_summary.set_text(f"Restart: {restart_expression} / Backup: {backup_summary}")
+        def finished(result, error) -> None:
+            if error is None:
+                self.settings = candidate
+                self.services.settings = candidate
+                self.automation_summary.set_text(f"Restart: {restart_expression} / Backup: {backup_summary}")
+            self._operation_finished("自動化設定を適用しました", result, error)
+
         self._run_async(
             "自動化設定を適用中…",
-            self._apply_automation,
-            lambda result, error: self._operation_finished("自動化設定を適用しました", result, error),
+            lambda: self._apply_automation(candidate),
+            finished,
         )
 
-    def _apply_automation(self) -> str:
+    def _apply_automation(self, settings: AppSettings) -> str:
         if not self.server.configured:
             raise RuntimeError("先にMinecraftサーバーディレクトリを登録してください")
-        self.settings.save()
-        server_dir = Path(self.settings.server_dir)
+        server_dir = Path(settings.server_dir)
         restart_result = self.scheduler.apply_restart(
-            self.settings.restart,
+            settings.restart,
             server_dir,
-            self.settings.terminal,
-            self.settings.backup,
+            settings.terminal,
+            settings.backup,
         )
         backup_result = self.scheduler.apply_backup(
-            self.settings.backup,
+            settings.backup,
             server_dir,
-            self.settings.terminal,
+            settings.terminal,
         )
+        settings.save()
         return f"restart={restart_result}; backup={backup_result}"
 
     def _manual_backup(self, _button: Gtk.Button) -> None:
@@ -689,7 +750,8 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         destination = Path(self.backup_destination.get_text()).expanduser()
         keep_count = self.keep_count.get_value_as_int()
-        self._run_async("バックアップ作成中…", lambda: BackupService(self.server, destination).create(keep_count), lambda result, error: self._operation_finished("バックアップを作成しました", result, error))
+        keep_days = self.settings.backup.keep_days
+        self._run_async("バックアップ作成中…", lambda: BackupService(self.server, destination).create(keep_count, keep_days), lambda result, error: self._operation_finished("バックアップを作成しました", result, error))
 
     def _run_async(self, busy_message: str, worker, callback) -> None:
         if self.busy:
@@ -720,6 +782,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self._set_message(f"{success_message}: {detail}")
 
     def _refresh_tick(self) -> bool:
+        if self.shutdown_completed:
+            return False
+        if self.closing:
+            return True
         if self.refreshing:
             return True
         self.refreshing = True
@@ -737,6 +803,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _apply_refresh(self, status, log: str) -> bool:
         self.refreshing = False
+        if self.closing or self.shutdown_completed:
+            return False
         if not status.running:
             self.log_counts = {"INFO": 0, "WARN": 0, "ERROR": 0}
             self.log_snapshot = log
@@ -799,13 +867,15 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             old_lines = self.log_snapshot.splitlines()
             last_line = old_lines[-1] if old_lines else ""
-            position = log.find(last_line) if last_line else -1
+            position = log.rfind(last_line) if last_line else -1
             delta = log[position + len(last_line):] if position >= 0 else ""
         self._count_log_text(delta)
         self.log_snapshot = log
 
     def _apply_refresh_error(self, error: Exception) -> bool:
         self.refreshing = False
+        if self.closing or self.shutdown_completed:
+            return False
         self.status_bar.set_text(f"状態取得失敗: {error}")
         return False
 
@@ -818,10 +888,34 @@ class MainWindow(Gtk.ApplicationWindow):
         dialog.run()
         dialog.destroy()
 
+    def _managed_server_is_active(self) -> bool:
+        """Return whether closing the app would stop a running/starting server."""
+        if not self.server.configured:
+            return False
+        status = self.server.status(console="")
+        return status.running or self.server.minecraft_process_active()
+
+    def _confirm_close_while_running(self) -> bool:
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text="サーバーが起動中です。本当に閉じますか？",
+        )
+        dialog.format_secondary_text("YESを選ぶとサーバーを停止してからM.A.R.S.を終了します。")
+        dialog.add_buttons("YES", Gtk.ResponseType.YES, "NO", Gtk.ResponseType.NO)
+        dialog.set_default_response(Gtk.ResponseType.NO)
+        response = dialog.run()
+        dialog.destroy()
+        return response == Gtk.ResponseType.YES
+
     def _on_delete_event(self, _window, _event) -> bool:
         if self.shutdown_completed:
             return False
         if self.closing:
+            return True
+        if self._managed_server_is_active() and not self._confirm_close_while_running():
             return True
         self.closing = True
         self.busy = True

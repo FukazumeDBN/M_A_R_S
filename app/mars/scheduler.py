@@ -11,7 +11,12 @@ class ScheduleValidationError(ValueError):
     pass
 
 
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
 def validate_time(value: str) -> str:
+    if not isinstance(value, str):
+        raise ScheduleValidationError("時刻はHH:MM形式で入力してください")
     parts = value.strip().split(":")
     if len(parts) != 2:
         raise ScheduleValidationError("時刻はHH:MM形式で入力してください")
@@ -28,18 +33,24 @@ def calendar_expression(mode: str, day: str, time: str) -> str:
     normalized_time = validate_time(time)
     if mode == "daily":
         return f"*-*-* {normalized_time}:00"
-    if mode == "weekly" and day in {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}:
-        return f"{day} *-*-* {normalized_time}:00"
+    if mode == "weekly":
+        if not isinstance(day, str):
+            raise ScheduleValidationError("日次または曜日指定を選択してください")
+        selected_days = [part.strip() for part in day.split(",") if part.strip()]
+        if selected_days and all(item in WEEKDAYS for item in selected_days):
+            unique_days = list(dict.fromkeys(selected_days))
+            return f"{','.join(unique_days)} *-*-* {normalized_time}:00"
     raise ScheduleValidationError("日次または曜日指定を選択してください")
 
 
-def interval_expression(value: int, unit: str) -> str:
-    if not 1 <= value <= 999:
-        raise ScheduleValidationError("実行間隔は1〜999で設定してください")
-    suffix = {"hours": "h", "days": "d"}.get(unit)
-    if suffix is None:
-        raise ScheduleValidationError("実行間隔の単位は時間または日を選択してください")
-    return f"{value}{suffix}"
+def calendar_expression_for_settings(settings) -> str:
+    """Build a calendar expression, including schedules from older settings."""
+    if settings.mode == "weekly":
+        days = getattr(settings, "days", None) or [settings.day]
+        if days == ["Mon"] and settings.day != "Mon":
+            days = [settings.day]
+        return calendar_expression("weekly", ",".join(days), settings.time)
+    return calendar_expression(settings.mode, settings.day, settings.time)
 
 
 class SystemdScheduler:
@@ -102,7 +113,7 @@ class SystemdScheduler:
         ]
 
     def apply_restart(self, settings, server_dir: Path, terminal=None, backup=None) -> str:
-        expression = interval_expression(settings.interval_value, settings.interval_unit)
+        expression = calendar_expression_for_settings(settings)
         args = ["--server-dir", str(Path(server_dir).resolve()), *self._terminal_args(terminal)]
         if backup is not None and backup.enabled and backup.linked_to_restart:
             args.extend([
@@ -110,14 +121,14 @@ class SystemdScheduler:
                 "--keep-count", str(backup.keep_count),
                 "--keep-days", str(backup.keep_days),
             ])
-        self._apply("restart", settings.enabled, f"OnActiveSec={expression}\nOnUnitActiveSec={expression}", args)
+        self._apply("restart", settings.enabled, f"OnCalendar={expression}", args)
         return expression if settings.enabled else "disabled"
 
     def apply_backup(self, settings, server_dir: Path, terminal=None) -> str:
-        expression = interval_expression(settings.interval_value, settings.interval_unit)
+        expression = calendar_expression_for_settings(settings)
         enabled = settings.enabled and not settings.linked_to_restart
         args = ["--server-dir", str(Path(server_dir).resolve()), *self._terminal_args(terminal), "--destination", str(Path(settings.destination).expanduser().resolve()), "--keep-count", str(settings.keep_count), "--keep-days", str(settings.keep_days)]
-        self._apply("backup", enabled, f"OnActiveSec={expression}\nOnUnitActiveSec={expression}", args)
+        self._apply("backup", enabled, f"OnCalendar={expression}", args)
         if not settings.enabled:
             return "disabled"
         if settings.linked_to_restart:
