@@ -14,12 +14,12 @@
 | 現在のtmuxセッション設定 | `Kichi_Craft_Pre` |
 | 接続先 | `127.0.0.1:25565` |
 | Minecraft / Forge / Java | 1.20.1 / 47.4.10 / OpenJDK 17 |
-| GitHub | `https://github.com/FukazumeDBN/M_A_R_S`（非公開） |
+| GitHub | `https://github.com/FukazumeDBN/M_A_R_S`（公開） |
 | ブランチ | `main` |
 | 自動テスト | 31件（実Minecraftサーバーは操作しない） |
 | systemdタイマー | 実環境では未有効化・未運用確認 |
 
-Task 23〜28までの週間スケジュール、連動バックアップ、終了確認、初回監査、GitHub公開は`main`へ反映済み。Task 29〜34のUI修正、Log Counter削除、Status拡大、再起動警告、今回の横断監査は未コミット変更である。引き継ぎ時は、ユーザーの変更を失わないよう最初に`git status`と`git diff`を確認する。
+Task 23〜35までの週間スケジュール、連動バックアップ、終了確認、再起動警告、横断監査、GitHub公開を`main`へ反映済み。リポジトリは公開設定で、直近の実装コミットは`12d79a2`。引き継ぎ時は、ユーザーの変更を失わないよう最初に`git status`と`git diff`を確認する。
 
 ## 再開時の確認
 

@@ -9,11 +9,11 @@ M.A.R.S.（Minecraft Administration & Runtime Supervisor）は、Ubuntu系Linux�
 | 状態 | Draft 2.9（全体監査・安定性改善） |
 | 最終更新 | 2026-09-03 JST |
 | 対象プロジェクト | `mars` |
-| GitHubリポジトリ | `https://github.com/FukazumeDBN/M_A_R_S`（非公開） |
+| GitHubリポジトリ | `https://github.com/FukazumeDBN/M_A_R_S`（公開） |
 | 進捗DB | `/home/chappy/empire/data/empire.sqlite3` |
 | 開発メモ | `/home/chappy/empire/projects/mars/DEVELOPMENT_NOTES.md` |
 | 進捗DBプロジェクト | 新規作業は`mars`、既存履歴は`minecraft-server` |
-| 直近の完了タスク | Task 18〜34 |
+| 直近の完了タスク | Task 18〜35 |
 | 現在の作業 | なし |
 
 この文書は製品要件・非機能要件・設計方針の正本とする。進捗、作業状態、短い作業記録、設計判断は進捗DBを正本とする。両方を用いることで、会話履歴やセッションが失われても開発を再開できる状態を保つ。
