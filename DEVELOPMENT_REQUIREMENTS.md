@@ -13,7 +13,7 @@ M.A.R.S.（Minecraft Administration & Runtime Supervisor）は、Ubuntu系Linux�
 | 進捗DB | `/home/chappy/empire/data/empire.sqlite3` |
 | 開発メモ | `/home/chappy/empire/projects/mars/DEVELOPMENT_NOTES.md` |
 | 進捗DBプロジェクト | 新規作業は`mars`、既存履歴は`minecraft-server` |
-| 直近の完了タスク | Task 18〜35 |
+| 直近の完了タスク | Task 18〜36 |
 | 現在の作業 | なし |
 
 この文書は製品要件・非機能要件・設計方針の正本とする。進捗、作業状態、短い作業記録、設計判断は進捗DBを正本とする。両方を用いることで、会話履歴やセッションが失われても開発を再開できる状態を保つ。
