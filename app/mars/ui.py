@@ -9,9 +9,11 @@ from pathlib import Path
 import gi
 
 gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
 gi.require_version("Vte", "2.91")
 from gi.repository import Gdk, GLib, Gtk, Pango, Vte
 
+from .automation import restart_warning_summary
 from .backup import BackupService
 from .jvm import JvmArgumentFile
 from .scheduler import ScheduleValidationError, WEEKDAYS, calendar_expression, validate_time
@@ -28,7 +30,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.settings = AppSettings.load()
         self.services = ApplicationServices.build(self.settings, Path(__file__).resolve().parents[1])
         self.server = self.services.runtime
-        self.scheduler = self.services.scheduler
         self.busy = False
         self.refreshing = False
         self.closing = False
@@ -36,9 +37,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.console_child_pid: int | None = None
         self.console_recovering = False
         self.console_auto_follow = True
-        self.server_was_running = False
-        self.log_snapshot = ""
-        self.log_counts = {"INFO": 0, "WARN": 0, "ERROR": 0}
         self._install_css()
         self._build_ui()
         self.connect("delete-event", self._on_delete_event)
@@ -64,7 +62,7 @@ class MainWindow(Gtk.ApplicationWindow):
             .metric-label { color: #000000; font-size: 13px; }
             .metric-field { background: #ffffff; border: 1px solid #000000; border-radius: 0; padding: 3px 6px; min-width: 72px; }
             .metric-value { color: #000000; font-size: 16px; font-weight: bold; }
-            .status-value { font-size: 25px; font-weight: bold; }
+            .status-value { font-size: 40px; font-weight: bold; }
             .status-online { color: #16823b; }
             .status-offline { color: #c62828; }
             .section-title { font-size: 15px; font-weight: bold; color: #000000; }
@@ -82,9 +80,6 @@ class MainWindow(Gtk.ApplicationWindow):
             .schedule-day { min-width: 30px; min-height: 28px; padding: 2px 5px; background: #ffffff; color: #000000; }
             .schedule-day:checked { background: #000000; color: #ffffff; }
             .schedule-day:checked:hover { background: #222222; color: #ffffff; }
-            .counter-info { color: #333333; font-weight: bold; }
-            .counter-warn { color: #a87900; font-weight: bold; }
-            .counter-error { color: #c62828; font-weight: bold; }
             """
         )
         screen = Gdk.Screen.get_default()
@@ -100,8 +95,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _build_ui(self) -> None:
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        main = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
-        main.set_position(64)
+        # The navigation rail is intentionally a fixed-width icon strip.  A
+        # Gtk.Paned here makes it draggable and lets it consume page space.
+        main = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         root.pack_start(main, True, True, 0)
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -123,7 +119,7 @@ class MainWindow(Gtk.ApplicationWindow):
             button.set_tooltip_text(title)
             button.connect("clicked", lambda _button, page=name: self.stack.set_visible_child_name(page))
             sidebar.pack_start(button, False, False, 0)
-        main.add1(sidebar)
+        main.pack_start(sidebar, False, False, 0)
 
         right = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
         right.set_position(610)
@@ -157,9 +153,14 @@ class MainWindow(Gtk.ApplicationWindow):
         scroll.add(self.console)
         console_box.pack_start(scroll, True, True, 0)
         right.add2(console_box)
-        main.add2(right)
+        main.pack_start(right, True, True, 0)
 
         self.status_bar = Gtk.Label(label="Connecting…", xalign=0)
+        # Operation results can include a full JVM argument string.  Keep the
+        # status bar to one line so an unexpected long result never changes
+        # the console's allocated height.
+        self.status_bar.set_single_line_mode(True)
+        self.status_bar.set_ellipsize(Pango.EllipsizeMode.END)
         self.status_bar.get_style_context().add_class("statusbar")
         root.pack_end(self.status_bar, False, False, 0)
         self.add(root)
@@ -320,25 +321,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.overview_status = Gtk.Label(label="確認中…", xalign=0.5)
         self.overview_status.get_style_context().add_class("status-value")
         status_block = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        status_block.set_size_request(86, -1)
+        status_block.set_size_request(150, -1)
         status_block.pack_start(self._label("Status", "muted"), False, False, 0)
         status_block.pack_start(self.overview_status, False, False, 0)
         display.pack_start(status_block, False, False, 0)
-
-        display.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
-
-        counters = Gtk.Frame()
-        counters.get_style_context().add_class("card")
-        counters.set_size_request(120, -1)
-        counter_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        counter_box.pack_start(self._label("Log counters", "muted"), False, False, 0)
-        self.info_counter = self._label("Info: 0", "counter-info")
-        self.warn_counter = self._label("WARN: 0", "counter-warn")
-        self.error_counter = self._label("ERROR: 0", "counter-error")
-        for label in (self.info_counter, self.warn_counter, self.error_counter):
-            counter_box.pack_start(label, False, False, 0)
-        counters.add(counter_box)
-        display.pack_start(counters, False, False, 0)
 
         display.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
 
@@ -456,16 +442,20 @@ class MainWindow(Gtk.ApplicationWindow):
         if not self.server.configured:
             self._show_error("先にMinecraftサーバーディレクトリを登録してください。")
             return
-        if self.server.status(console="").running or self.server.minecraft_process_active():
+        if self.server.active():
             self._show_error("JVM設定はMinecraftサーバー停止中に適用してください。")
             return
         start, end = self.jvm_custom_buffer.get_bounds()
         custom = self.jvm_custom_buffer.get_text(start, end, False)
+        minimum = self.jvm_min_entry.get_text()
+        maximum = self.jvm_max_entry.get_text()
         manager = JvmArgumentFile(Path(self.settings.server_dir))
         self._run_async(
             "JVM設定を適用中…",
-            lambda: manager.apply(self.jvm_min_entry.get_text(), self.jvm_max_entry.get_text(), custom),
-            lambda result, error: self._operation_finished("JVM設定を適用しました", result, error),
+            lambda: manager.apply(minimum, maximum, custom),
+            lambda _result, error: self._operation_finished(
+                "JVM設定を適用しました", "user_jvm_args.txtへ反映済み", error
+            ),
         )
 
     @staticmethod
@@ -494,7 +484,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _automation_page(self) -> Gtk.Widget:
         grid = self._page_grid()
         grid.attach(self._label("Automation", "page-title"), 0, 0, 4, 1)
-        grid.attach(self._label("GUIを閉じてもsystemdユーザータイマーで実行されます", "muted"), 0, 1, 4, 1)
+        grid.attach(self._label("M.A.R.S.起動中にsystemdユーザータイマーで実行されます", "muted"), 0, 1, 4, 1)
 
         grid.attach(self._label("Scheduled restart", "section-title"), 0, 3, 4, 1)
         grid.attach(self._label("Enabled", "muted"), 0, 4, 1, 1)
@@ -508,6 +498,7 @@ class MainWindow(Gtk.ApplicationWindow):
         grid.attach(self._label("Time", "muted"), 0, 6, 1, 1)
         self.restart_time = self._time_entry(self.settings.restart.time)
         grid.attach(self.restart_time, 1, 6, 1, 1)
+        grid.attach(self._label(f"Warnings: {restart_warning_summary()}", "muted"), 0, 7, 4, 1)
 
         grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 8, 4, 1)
         grid.attach(self._label("Scheduled backup", "section-title"), 0, 9, 4, 1)
@@ -620,6 +611,9 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         old_server = self.server
         changed = old_server.server_dir != services.runtime.server_dir or old_server.terminal_attach_argv() != services.runtime.terminal_attach_argv()
+        if changed and old_server.active():
+            self._show_error("稼働中のMinecraftを停止してから、サーバーディレクトリまたはセッション名を変更してください。")
+            return
 
         def register() -> str:
             if changed:
@@ -635,7 +629,6 @@ class MainWindow(Gtk.ApplicationWindow):
             self.settings = new_settings
             self.services = services
             self.server = services.runtime
-            self.scheduler = services.scheduler
             self._load_jvm_fields()
             try:
                 self._attach_console()
@@ -661,7 +654,11 @@ class MainWindow(Gtk.ApplicationWindow):
             self._show_error("先にMinecraftサーバーディレクトリを登録してください。")
             return
         method = getattr(self.server, action)
-        self._run_async(f"{action}中…", method, lambda result, error: self._operation_finished(f"{action}完了", result, error))
+
+        def finished(result, error) -> None:
+            self._operation_finished(f"{action}完了", result, error)
+
+        self._run_async(f"{action}中…", method, finished)
 
     def _save_automation_settings(self, _button: Gtk.Button) -> None:
         restart_enabled = self.restart_enabled.get_active()
@@ -714,7 +711,6 @@ class MainWindow(Gtk.ApplicationWindow):
         def finished(result, error) -> None:
             if error is None:
                 self.settings = candidate
-                self.services.settings = candidate
                 self.automation_summary.set_text(f"Restart: {restart_expression} / Backup: {backup_summary}")
             self._operation_finished("自動化設定を適用しました", result, error)
 
@@ -725,22 +721,7 @@ class MainWindow(Gtk.ApplicationWindow):
         )
 
     def _apply_automation(self, settings: AppSettings) -> str:
-        if not self.server.configured:
-            raise RuntimeError("先にMinecraftサーバーディレクトリを登録してください")
-        server_dir = Path(settings.server_dir)
-        restart_result = self.scheduler.apply_restart(
-            settings.restart,
-            server_dir,
-            settings.terminal,
-            settings.backup,
-        )
-        backup_result = self.scheduler.apply_backup(
-            settings.backup,
-            server_dir,
-            settings.terminal,
-        )
-        settings.save()
-        return f"restart={restart_result}; backup={backup_result}"
+        return self.services.apply_automation(settings)
 
     def _manual_backup(self, _button: Gtk.Button) -> None:
         if self.busy:
@@ -792,27 +773,18 @@ class MainWindow(Gtk.ApplicationWindow):
 
         def refresh():
             try:
-                log = self.server.console_text()
-                status = self.server.status(log)
-                GLib.idle_add(self._apply_refresh, status, log)
+                status = self.server.status()
+                GLib.idle_add(self._apply_refresh, status)
             except Exception as exc:
                 GLib.idle_add(self._apply_refresh_error, exc)
 
         threading.Thread(target=refresh, name="mars-refresh", daemon=True).start()
         return True
 
-    def _apply_refresh(self, status, log: str) -> bool:
+    def _apply_refresh(self, status) -> bool:
         self.refreshing = False
         if self.closing or self.shutdown_completed:
             return False
-        if not status.running:
-            self.log_counts = {"INFO": 0, "WARN": 0, "ERROR": 0}
-            self.log_snapshot = log
-        elif not self.server_was_running:
-            self._start_log_counter(log)
-        else:
-            self._count_new_log_lines(log)
-        self.server_was_running = status.running
 
         state = "Online" if status.running and status.port_open else "Offline"
         terminal_state = "Online" if status.running else "Terminal ready" if status.terminal_running else "Offline"
@@ -829,48 +801,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.overview_mods.set_text(status.mods)
         self.overview_tps.set_text(status.tps)
         self.overview_ping.set_text(status.ping)
-        self.info_counter.set_text(f"Info: {self.log_counts['INFO']}")
-        self.warn_counter.set_text(f"WARN: {self.log_counts['WARN']}")
-        self.error_counter.set_text(f"ERROR: {self.log_counts['ERROR']}")
         return False
-
-    @staticmethod
-    def _line_level(line: str) -> str | None:
-        if "/ERROR]" in line or "[ERROR]" in line or " ERROR " in line:
-            return "ERROR"
-        if "/WARN]" in line or "[WARN]" in line or " WARN " in line:
-            return "WARN"
-        if "/INFO]" in line or "[INFO]" in line or " INFO " in line:
-            return "INFO"
-        return None
-
-    def _count_log_text(self, text: str) -> None:
-        for line in text.splitlines():
-            level = self._line_level(line)
-            if level:
-                self.log_counts[level] += 1
-
-    def _start_log_counter(self, log: str) -> None:
-        self.log_counts = {"INFO": 0, "WARN": 0, "ERROR": 0}
-        lines = log.splitlines()
-        start_index = -1
-        for index, line in enumerate(lines):
-            if "Starting minecraft server" in line or "Starting Minecraft server" in line:
-                start_index = index
-        if start_index >= 0:
-            self._count_log_text("\n".join(lines[start_index:]))
-        self.log_snapshot = log
-
-    def _count_new_log_lines(self, log: str) -> None:
-        if log.startswith(self.log_snapshot):
-            delta = log[len(self.log_snapshot):]
-        else:
-            old_lines = self.log_snapshot.splitlines()
-            last_line = old_lines[-1] if old_lines else ""
-            position = log.rfind(last_line) if last_line else -1
-            delta = log[position + len(last_line):] if position >= 0 else ""
-        self._count_log_text(delta)
-        self.log_snapshot = log
 
     def _apply_refresh_error(self, error: Exception) -> bool:
         self.refreshing = False
@@ -880,7 +811,12 @@ class MainWindow(Gtk.ApplicationWindow):
         return False
 
     def _set_message(self, message: str) -> None:
-        self.status_bar.set_text(message)
+        # Avoid multiline/oversized worker results expanding the window layout.
+        one_line = " ".join(str(message).split())
+        maximum_length = 240
+        if len(one_line) > maximum_length:
+            one_line = f"{one_line[:maximum_length - 1]}…"
+        self.status_bar.set_text(one_line)
 
     def _show_error(self, message: str) -> None:
         dialog = Gtk.MessageDialog(transient_for=self, flags=0, message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.OK, text="M.A.R.S.でエラーが発生しました")
@@ -892,8 +828,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """Return whether closing the app would stop a running/starting server."""
         if not self.server.configured:
             return False
-        status = self.server.status(console="")
-        return status.running or self.server.minecraft_process_active()
+        return self.server.active()
 
     def _confirm_close_while_running(self) -> bool:
         dialog = Gtk.MessageDialog(

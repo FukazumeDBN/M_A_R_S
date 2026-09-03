@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .automation import RESTART_WARNING_LEAD_MINUTES
+
 
 class ScheduleValidationError(ValueError):
     pass
@@ -53,6 +55,29 @@ def calendar_expression_for_settings(settings) -> str:
     return calendar_expression(settings.mode, settings.day, settings.time)
 
 
+def calendar_expressions_with_offset(settings, offset_minutes: int) -> list[str]:
+    """Return schedule expressions shifted by minutes, preserving weekdays."""
+    if settings.mode == "daily":
+        hour, minute = (int(part) for part in validate_time(settings.time).split(":"))
+        shifted = (hour * 60 + minute + offset_minutes) % (24 * 60)
+        return [calendar_expression("daily", settings.day, f"{shifted // 60:02d}:{shifted % 60:02d}")]
+
+    days = getattr(settings, "days", None) or [settings.day]
+    if days == ["Mon"] and settings.day != "Mon":
+        days = [settings.day]
+    hour, minute = (int(part) for part in validate_time(settings.time).split(":"))
+    shifted_total = hour * 60 + minute + offset_minutes
+    day_delta, shifted_minutes = divmod(shifted_total, 24 * 60)
+    grouped: dict[str, list[str]] = {}
+    for day in days:
+        if day not in WEEKDAYS:
+            raise ScheduleValidationError("日次または曜日指定を選択してください")
+        shifted_day = WEEKDAYS[(WEEKDAYS.index(day) + day_delta) % len(WEEKDAYS)]
+        shifted_time = f"{shifted_minutes // 60:02d}:{shifted_minutes % 60:02d}"
+        grouped.setdefault(shifted_time, []).append(shifted_day)
+    return [calendar_expression("weekly", ",".join(shifted_days), shifted_time) for shifted_time, shifted_days in grouped.items()]
+
+
 class SystemdScheduler:
     """Writes only M.A.R.S.-owned user units and activates them on request."""
 
@@ -93,8 +118,17 @@ class SystemdScheduler:
             raise ScheduleValidationError("自動化設定へ改行またはNUL文字を含めることはできません")
         # systemd expands percent specifiers even inside quoted arguments.
         command = shlex.join(["/usr/bin/python3", str(self.worker), kind, *args]).replace("%", "%%")
-        self._write(service, "[Unit]\nDescription=M.A.R.S. " + kind + " worker\n\n[Service]\nType=oneshot\nExecStart=" + command + "\n")
-        self._write(timer, "[Unit]\nDescription=M.A.R.S. scheduled " + kind + "\n\n[Timer]\n" + timer_rules + "\nPersistent=true\nUnit=" + service + "\n\n[Install]\nWantedBy=timers.target\n")
+        service_content = (
+            f"[Unit]\nDescription=M.A.R.S. {kind} worker\n\n"
+            f"[Service]\nType=oneshot\nTimeoutStartSec=2h\nExecStart={command}\n"
+        )
+        timer_content = (
+            f"[Unit]\nDescription=M.A.R.S. scheduled {kind}\n\n"
+            f"[Timer]\n{timer_rules}\nAccuracySec=1s\nPersistent=true\nUnit={service}\n\n"
+            "[Install]\nWantedBy=timers.target\n"
+        )
+        self._write(service, service_content)
+        self._write(timer, timer_content)
         self._run_systemctl("daemon-reload")
         if enabled:
             self._run_systemctl("enable", "--now", timer)
@@ -121,13 +155,27 @@ class SystemdScheduler:
                 "--keep-count", str(backup.keep_count),
                 "--keep-days", str(backup.keep_days),
             ])
-        self._apply("restart", settings.enabled, f"OnCalendar={expression}", args)
+        # The worker starts 30 minutes early, emits all warnings, then waits
+        # until the original schedule before stopping the server.
+        warning_expressions = calendar_expressions_with_offset(settings, -RESTART_WARNING_LEAD_MINUTES)
+        timer_rules = "\n".join(f"OnCalendar={item}" for item in warning_expressions)
+        self._apply("restart", settings.enabled, timer_rules, args)
         return expression if settings.enabled else "disabled"
 
     def apply_backup(self, settings, server_dir: Path, terminal=None) -> str:
         expression = calendar_expression_for_settings(settings)
         enabled = settings.enabled and not settings.linked_to_restart
-        args = ["--server-dir", str(Path(server_dir).resolve()), *self._terminal_args(terminal), "--destination", str(Path(settings.destination).expanduser().resolve()), "--keep-count", str(settings.keep_count), "--keep-days", str(settings.keep_days)]
+        args = [
+            "--server-dir",
+            str(Path(server_dir).resolve()),
+            *self._terminal_args(terminal),
+            "--destination",
+            str(Path(settings.destination).expanduser().resolve()),
+            "--keep-count",
+            str(settings.keep_count),
+            "--keep-days",
+            str(settings.keep_days),
+        ]
         self._apply("backup", enabled, f"OnCalendar={expression}", args)
         if not settings.enabled:
             return "disabled"

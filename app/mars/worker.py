@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.action == "restart":
         if args.backup_destination:
-            result, restart_result = server.restart_with_backup(
+            result, restart_result = server.restart_with_warnings(
                 BackupService(server, args.backup_destination),
                 args.keep_count,
                 args.keep_days,
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"backup: {result.archive} ({result.size} bytes)")
             print(restart_result)
             return 0
-        print(server.restart())
+        print(server.restart_with_warnings())
         return 0
     result = BackupService(server, args.destination).create(args.keep_count, args.keep_days)
     print(f"backup: {result.archive} ({result.size} bytes)")

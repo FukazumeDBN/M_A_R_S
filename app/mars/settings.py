@@ -35,7 +35,6 @@ class RestartSettings:
     mode: str = "weekly"
     day: str = "Mon"
     days: list[str] = field(default_factory=lambda: ["Mon"])
-    warnings: list[int] = field(default_factory=lambda: [10, 5, 1])
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -50,8 +49,6 @@ class RestartSettings:
         if self.days == ["Mon"] and self.day != "Mon":
             self.days = [self.day]
         self.days = _normalized_days(self.days, self.day)
-        if not isinstance(self.warnings, list) or not all(type(value) is int and value >= 0 for value in self.warnings):
-            self.warnings = [10, 5, 1]
 
 
 @dataclass

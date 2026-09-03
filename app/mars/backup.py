@@ -95,7 +95,8 @@ class BackupService:
         failure: Exception | None = None
         restore_failure: Exception | None = None
         try:
-            if self.server.status().running:
+            status = self.server.status()
+            if status.running:
                 save_cursor = self.server.save_log_cursor()
                 if not self.server.send_command("save-off"):
                     raise BackupError("save-offをMinecraftへ送信できません")
@@ -103,6 +104,8 @@ class BackupService:
                 if not self.server.send_command("save-all flush"):
                     raise BackupError("save-all flushをMinecraftへ送信できません")
                 self.server.wait_for_save_complete(save_cursor)
+            elif getattr(self.server, "minecraft_process_active", lambda: False)():
+                raise BackupError("Minecraftが起動または停止処理中のため、状態が安定してからバックアップしてください")
             with tarfile.open(temporary, "w:gz") as bundle:
                 bundle.add(world, arcname=self.world_name, filter=self._tar_filter)
         except Exception as exc:

@@ -39,6 +39,8 @@ class JvmArgumentFile:
 
     @classmethod
     def validate(cls, minimum: str, maximum: str, custom: str) -> JvmConfig:
+        if "\0" in custom:
+            raise JvmConfigError("任意JVM引数へNUL文字を含めることはできません")
         minimum = minimum.strip().upper()
         maximum = maximum.strip().upper()
         if cls._memory_mib(minimum) > cls._memory_mib(maximum):

@@ -9,11 +9,12 @@ import time
 import unittest
 from pathlib import Path
 
+from app.mars.automation import RESTART_WARNING_SECONDS, restart_warning_command
 from app.mars.backup import BackupError, BackupService
 from app.mars.extensions import ExtensionDescriptor, builtin_extensions
 from app.mars.jvm import JvmArgumentFile, JvmConfigError
 from app.mars.operations import OperationBusyError, ServerOperationLock
-from app.mars.scheduler import ScheduleValidationError, SystemdScheduler, calendar_expression, validate_time
+from app.mars.scheduler import ScheduleValidationError, SystemdScheduler, calendar_expression, calendar_expressions_with_offset, validate_time
 from app.mars.server import ServerCommandError, ServerRuntime, TmuxServerAdapter
 from app.mars.services import ApplicationServices
 from app.mars.settings import AppSettings
@@ -42,6 +43,9 @@ class FakeServer:
 
     def wait_for_save_complete(self, cursor: int) -> None:
         self.flush_cursors.append(cursor)
+
+    def minecraft_process_active(self) -> bool:
+        return False
 
 
 class FakeTerminal:
@@ -179,6 +183,8 @@ class MarsCoreTests(unittest.TestCase):
                 manager.apply("8G", "4G", "")
             with self.assertRaises(JvmConfigError):
                 manager.apply("1G", "4G", "-Xmx3G")
+            with self.assertRaisesRegex(JvmConfigError, "NUL"):
+                manager.apply("1G", "4G", "-Dname=bad\0value")
 
     def test_backup_creates_valid_archive_and_restores_save_mode(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -226,6 +232,24 @@ class MarsCoreTests(unittest.TestCase):
             with self.assertRaisesRegex(BackupError, "save-on"):
                 BackupService(RestoreFailServer(root), destination).create()
             self.assertEqual(list(destination.glob("minecraft-backup-*.tar.gz")), [])
+
+    def test_backup_rejects_starting_or_stopping_server(self):
+        class TransitioningServer(FakeServer):
+            def status(self):
+                status = FakeStatus()
+                status.running = False
+                return status
+
+            def minecraft_process_active(self) -> bool:
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "server"
+            (root / "world").mkdir(parents=True)
+            destination = Path(directory) / "backups"
+            with self.assertRaisesRegex(BackupError, "起動または停止処理中"):
+                BackupService(TransitioningServer(root), destination).create()
+            self.assertEqual(list(destination.glob("*.tar.gz")), [])
 
     def test_backup_retention_caps_recent_archives(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -283,8 +307,78 @@ class MarsCoreTests(unittest.TestCase):
             timer = (units / "mars-restart.timer").read_text()
             self.assertIn("mars_worker.py restart", service)
             self.assertIn("100%%", service)
-            self.assertIn("OnCalendar=Sat *-*-* 04:05:00", timer)
+            self.assertIn("TimeoutStartSec=2h", service)
+            self.assertIn("OnCalendar=Sat *-*-* 03:35:00", timer)
+            self.assertIn("AccuracySec=1s", timer)
             self.assertNotIn("OnActiveSec=", timer)
+
+    def test_restart_warning_schedule_uses_say_except_title_at_ten_and_one_minute(self):
+        expected = [
+            "say サーバーは30分後に再起動します。",
+            'title @a title {"text":"サーバーは10分後に再起動します。","color":"yellow"}',
+            "say サーバーは5分後に再起動します。",
+            "say サーバーは3分後に再起動します。",
+            "say サーバーは2分後に再起動します。",
+            'title @a title {"text":"サーバーは1分後に再起動します。","color":"yellow"}',
+            "say サーバーは30秒後に再起動します。",
+            "say サーバーは10秒後に再起動します。",
+        ]
+        actual = [restart_warning_command(seconds) for seconds in RESTART_WARNING_SECONDS]
+        self.assertEqual(actual, expected)
+
+    def test_restart_warning_schedule_shifts_previous_day_when_needed(self):
+        settings = AppSettings().restart
+        settings.days = ["Mon"]
+        settings.day = "Mon"
+        settings.time = "00:15"
+        self.assertEqual(calendar_expressions_with_offset(settings, -30), ["Sun *-*-* 23:45:00"])
+
+    def test_restart_with_warnings_waits_between_messages_and_restarts(self):
+        events: list[str] = []
+        now = [0.0]
+
+        class WarningRuntime(OfflineRuntime):
+            def _port_open(self) -> bool:
+                return True
+
+            def _restart_locked(self, *args, **kwargs):
+                events.append("restart")
+                return "restarted"
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = WarningRuntime(Path(directory), FakeTerminal(exists=True))
+            result = runtime.restart_with_warnings(
+                sleep_fn=lambda duration: (events.append(f"sleep:{duration:g}"), now.__setitem__(0, now[0] + duration)),
+                clock_fn=lambda: now[0],
+            )
+        self.assertEqual(result, "restarted")
+        self.assertEqual(runtime.terminal.commands, [restart_warning_command(seconds) for seconds in RESTART_WARNING_SECONDS])
+        self.assertEqual(events, ["sleep:1200", "sleep:300", "sleep:120", "sleep:60", "sleep:60", "sleep:30", "sleep:20", "restart"])
+
+    def test_restart_warning_wait_does_not_block_shutdown_and_skips_if_terminal_closes(self):
+        now = [0.0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            terminal = FakeTerminal(exists=True)
+
+            class WarningRuntime(OfflineRuntime):
+                def _port_open(self) -> bool:
+                    return True
+
+                def _restart_locked(self, *args, **kwargs):
+                    raise AssertionError("restart must not run after the managed terminal closes")
+
+            runtime = WarningRuntime(root, terminal)
+
+            def close_during_wait(duration: float) -> None:
+                with ServerOperationLock(root):
+                    pass
+                now[0] += duration
+                terminal.present = False
+
+            result = runtime.restart_with_warnings(sleep_fn=close_during_wait, clock_fn=lambda: now[0])
+            self.assertEqual(result, "scheduled restart skipped: managed terminal stopped")
+            self.assertEqual(terminal.commands, [restart_warning_command(1800)])
 
     def test_scheduler_links_backup_to_restart_and_disables_independent_timer(self):
         class FakeScheduler(SystemdScheduler):
@@ -333,6 +427,47 @@ class MarsCoreTests(unittest.TestCase):
             timer = (root / "units" / "mars-backup.timer").read_text()
             self.assertIn("OnCalendar=Wed *-*-* 22:30:00", timer)
             self.assertIn(("enable", "--now", "mars-backup.timer"), scheduler.calls)
+
+    def test_automation_apply_restores_previous_timers_when_second_apply_fails(self):
+        class FakeRuntime:
+            configured = True
+
+        class FailingScheduler:
+            def __init__(self):
+                self.calls: list[tuple[str, str]] = []
+                self.failed = False
+
+            def apply_restart(self, restart, _server_dir, _terminal, _backup):
+                self.calls.append(("restart", restart.time))
+                return restart.time
+
+            def apply_backup(self, backup, _server_dir, _terminal):
+                self.calls.append(("backup", backup.time))
+                if backup.time == "06:00" and not self.failed:
+                    self.failed = True
+                    raise RuntimeError("simulated backup timer failure")
+                return backup.time
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            previous = AppSettings(server_dir=str(root / "server"))
+            previous.restart.time = "04:00"
+            previous.backup.time = "05:00"
+            candidate = AppSettings(server_dir=str(root / "server"))
+            candidate.restart.time = "05:30"
+            candidate.backup.time = "06:00"
+            scheduler = FailingScheduler()
+            services = ApplicationServices(previous, FakeRuntime(), scheduler, builtin_extensions())
+
+            with self.assertRaisesRegex(RuntimeError, "simulated backup timer failure"):
+                services.apply_automation(candidate, root / "settings.json")
+
+            self.assertIs(services.settings, previous)
+            self.assertFalse((root / "settings.json").exists())
+            self.assertEqual(
+                scheduler.calls,
+                [("restart", "05:30"), ("backup", "06:00"), ("restart", "04:00"), ("backup", "05:00")],
+            )
 
     def test_tmux_backend_uses_argument_lists_and_literal_send_keys(self):
         calls: list[list[str]] = []
@@ -499,6 +634,31 @@ class MarsCoreTests(unittest.TestCase):
             (root / "mods").mkdir()
             (root / "mods" / "example.jar").write_bytes(b"jar")
             self.assertEqual(sum(1 for path in (root / "mods").glob("*.jar") if path.is_file()), 1)
+
+    def test_player_count_reads_only_new_latest_log_content(self):
+        class OnlineRuntime(ServerRuntime):
+            def _port_open(self) -> bool:
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = root / "logs"
+            logs.mkdir()
+            latest = logs / "latest.log"
+            latest.write_text("[Server thread/INFO]: alice joined the game\n", encoding="utf-8")
+            runtime = OnlineRuntime(root, FakeTerminal(exists=True))
+            self.assertEqual(runtime.status().players, "1")
+            with latest.open("a", encoding="utf-8") as handle:
+                handle.write("[Server thread/INFO]: bob joined the game")
+            self.assertEqual(runtime.status().players, "1")
+            with latest.open("a", encoding="utf-8") as handle:
+                handle.write("\n[Server thread/INFO]: alice left the game\n")
+            self.assertEqual(runtime.status().players, "1")
+
+            replacement = logs / "replacement.log"
+            replacement.write_text("[Server thread/INFO]: carol joined the game\n", encoding="utf-8")
+            os.replace(replacement, latest)
+            self.assertEqual(runtime.status().players, "1")
 
 
 if __name__ == "__main__":
